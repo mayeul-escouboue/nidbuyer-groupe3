@@ -33,7 +33,7 @@ def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: 
     budget_max : prix maximum en euros, frais d'agence inclus.
     quartier : nom du quartier (ex. "Mourillon"), ou None pour tous les quartiers.
     surface_min : surface minimale en m2, ou None.
-    mots_cles : mots a retrouver dans la description (ex. "jardin ecole"), ou None.
+    mots_cles : mots a retrouver dans le type ou la description (ex. "T3", "jardin ecole"), ou None.
     Retourne au plus 5 biens, les moins chers d'abord, avec id, type, surface, quartier, prix, description.
     """
     if budget_max <= 0:
@@ -44,8 +44,11 @@ def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: 
     if surface_min:
         biens = [b for b in biens if b["surface"] >= surface_min]
     if mots_cles:
-        mots = [m.lower() for m in mots_cles.split() if len(m) > 2]
-        biens = [b for b in biens if any(m in b["description"].lower() for m in mots)]
+        # "T2", "T3"... font 2 lettres : on les garde, sinon la liste de mots est vide et tout est filtre
+        mots = [m.lower() for m in mots_cles.split() if len(m) > 2 or m[:1].lower() == "t"]
+        if mots:
+            biens = [b for b in biens
+                     if any(m in f"{b['type']} {b['description']}".lower() for m in mots)]
     return sorted(biens, key=lambda b: b["prix"])[:5]
 
 
