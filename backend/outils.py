@@ -36,6 +36,17 @@ _SUSPECT = re.compile(
 )
 
 
+_GENERIQUES = {"appartement", "appartements", "appart", "logement", "logements", "bien", "biens",
+               "achat", "acheter", "vendre", "toulon"}
+
+
+def _simplifier(texte: str) -> str:
+    """'Le Mourillon' -> 'le mourillon', 'Saint-Jean-du-Var' -> 'saint jean du var' (sans accents)."""
+    import unicodedata
+    texte = unicodedata.normalize("NFKD", texte).encode("ascii", "ignore").decode().lower()
+    return " ".join(re.findall(r"[a-z0-9]+", texte))
+
+
 def _nettoyer(description: str) -> str:
     phrases = re.split(r"(?<=[.!?])\s+", description)
     gardees = [p for p in phrases if not _SUSPECT.search(p)]
@@ -51,6 +62,7 @@ def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: 
 
     budget_max : prix maximum en euros, frais d'agence inclus.
     quartier : nom du quartier (ex. "Mourillon"), ou None pour tous les quartiers.
+               Un quartier inconnu leve une erreur qui liste les quartiers disponibles.
     surface_min : surface minimale en m2, ou None.
     mots_cles : mots a retrouver dans le type ou la description (ex. "T3", "jardin ecole"), ou None.
     Retourne au plus 5 biens, les moins chers d'abord, avec id, type, surface, quartier, prix, description.
@@ -59,12 +71,19 @@ def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: 
         raise ValueError("budget_max doit etre positif, en euros")
     biens = [b for b in _annonces() if b["prix"] <= budget_max]
     if quartier:
-        biens = [b for b in biens if b["quartier"].lower() == quartier.strip().lower()]
+        connus = {_simplifier(b["quartier"]): b["quartier"] for b in _annonces()}
+        cle = re.sub(r"^(quartier )?(du |de la |des |de |le |la |les |l )", "", _simplifier(quartier))
+        if cle not in connus:
+            raise ValueError(f"quartier inconnu : {quartier}. Quartiers disponibles : "
+                             f"{', '.join(sorted(connus.values()))}.")
+        biens = [b for b in biens if _simplifier(b["quartier"]) == cle]
     if surface_min:
         biens = [b for b in biens if b["surface"] >= surface_min]
     if mots_cles:
         # "T2", "T3"... font 2 lettres : on les garde, sinon la liste de mots est vide et tout est filtre
         mots = [m.lower() for m in mots_cles.split() if len(m) > 2 or m[:1].lower() == "t"]
+        # mots generiques : ils ne discriminent rien et videraient la recherche
+        mots = [m for m in mots if m not in _GENERIQUES]
         if mots:
             biens = [b for b in biens
                      if any(m in f"{b['type']} {b['description']}".lower() for m in mots)]
