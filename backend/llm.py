@@ -313,6 +313,7 @@ def executer_agent(question: str, outils: list, system: str | None = None,
         raise LLMError(f"LLM_PROVIDER inconnu : {provider()}")
     avant = len(JOURNAL)
     resultat = boucle(question, par_nom, system, max_tours, temperature)
+    resultat["reponse"] = garde_fou_sortie(resultat["reponse"], system)
     # Les appels de cette boucle sont les dernieres entrees du journal
     # (approximatif seulement si le journal a atteint sa limite de 1000 entrees pendant la boucle).
     nouveaux = JOURNAL[avant:] if len(JOURNAL) > avant else []
@@ -322,8 +323,57 @@ def executer_agent(question: str, outils: list, system: str | None = None,
     return resultat
 
 
-def _executer_outil(par_nom: dict, nom: str, arguments: dict) -> dict:
+MAX_APPELS_OUTILS = 8
+
+REPONSE_REPLI = ("Je ne peux pas vous aider sur ce point. Un conseiller NidDouillet peut vous recontacter.\n\n"
+                 "Reponse generee par une IA, a verifier avec un conseiller.")
+_SECRETS = re.compile(r"AIza[0-9A-Za-z_\-]{20,}|sk-[0-9A-Za-z]{20,}|[A-Z_]*API_KEY|LLM_PROVIDER|LLM_MODEL"
+                      r"|GOOGLE_CLOUD_PROJECT|OLLAMA_URL|\.env\b")
+
+
+_AUTORISEES = [
+    "Tu es NidBuyer, conseiller d'achat immobilier a Toulon pour l'agence NidDouillet.",
+    "conseiller d'achat immobilier a Toulon pour l'agence NidDouillet",
+    "Je ne peux pas vous aider sur ce point",
+    "Reponse generee par une IA, a verifier avec un conseiller.",
+]
+
+
+def _mots(texte: str) -> list[str]:
+    import unicodedata
+    texte = unicodedata.normalize("NFKD", texte).encode("ascii", "ignore").decode().lower()
+    return re.findall(r"[a-z0-9]+", texte)
+
+
+def garde_fou_sortie(reponse: str, system: str | None) -> str:
+    """
+    Garde-fou en code, apres l'agent : un prompt n'est pas une garantie.
+    - fuite : la reponse recopie 7 mots consecutifs du prompt systeme, ou cite une cle / variable d'env ;
+    - boucle sans reponse (max_tours) : message de repli plutot qu'une reponse vide.
+    """
+    if not reponse.strip():
+        return REPONSE_REPLI
+    if _SECRETS.search(reponse):
+        return REPONSE_REPLI
+    if system:
+        # Phrases que l'agent a le droit de redire : on les retire des deux textes avant de comparer
+        texte_sys, texte_rep = " ".join(_mots(system)), " ".join(_mots(reponse))
+        for phrase in _AUTORISEES:
+            p = " ".join(_mots(phrase))
+            texte_sys, texte_rep = texte_sys.replace(p, " | "), texte_rep.replace(p, " | ")
+        m = texte_sys.split()
+        sequences = {" ".join(m[i:i + 7]) for i in range(len(m) - 6) if "|" not in m[i:i + 7]}
+        if any(seq in texte_rep for seq in sequences):
+            return REPONSE_REPLI
+    return reponse
+
+
+def _executer_outil(par_nom: dict, nom: str, arguments: dict, deja: int = 0) -> dict:
     appel = {"outil": nom, "arguments": arguments, "resultat": None, "erreur": None}
+    if deja >= MAX_APPELS_OUTILS:  # abus de cout : on n'execute plus rien, le modele doit conclure
+        appel["erreur"] = (f"limite de {MAX_APPELS_OUTILS} appels d'outils atteinte pour cette question : "
+                           "reponds maintenant avec les resultats deja obtenus.")
+        return appel
     if nom not in par_nom:
         appel["erreur"] = f"outil inconnu : {nom}"
         return appel
@@ -359,7 +409,7 @@ def _agent_google(question, par_nom, system, max_tours, temperature):
         contents.append(r.candidates[0].content)
         reponses = []
         for fc in r.function_calls:
-            appel = _executer_outil(par_nom, fc.name, dict(fc.args or {}))
+            appel = _executer_outil(par_nom, fc.name, dict(fc.args or {}), len(appels))
             appels.append(appel)
             reponses.append(types.Part.from_function_response(name=fc.name, response=_pour_modele(appel)))
         contents.append(types.Content(role="user", parts=reponses))
@@ -403,7 +453,8 @@ def _agent_ollama(question, par_nom, system, max_tours, temperature):
         for tc in msg["tool_calls"]:
             fn = tc["function"]
             args = fn.get("arguments") or {}
-            appel = _executer_outil(par_nom, fn["name"], json.loads(args) if isinstance(args, str) else args)
+            appel = _executer_outil(par_nom, fn["name"], json.loads(args) if isinstance(args, str) else args,
+                                    len(appels))
             appels.append(appel)
             messages.append({"role": "tool", "tool_name": fn["name"],
                              "content": json.dumps(_pour_modele(appel), ensure_ascii=False)})

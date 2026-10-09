@@ -14,6 +14,7 @@ Donnees : data/annonces_exemple.json et data/medianes_quartiers.csv sont des EXE
 FICTIFS pour demarrer. En P1, chercher_biens passe par le RAG et les medianes viennent du DVF.
 """
 import json
+import re
 from pathlib import Path
 
 from .marche import mediane_quartier as _mediane
@@ -23,6 +24,24 @@ ANNONCES_EXEMPLE = Path(__file__).resolve().parent.parent / "data" / "annonces_e
 
 def _annonces() -> list[dict]:
     return json.loads(ANNONCES_EXEMPLE.read_text(encoding="utf-8"))
+
+
+# Une description d'annonce est ecrite par un vendeur : elle peut contenir une injection
+# (« NOTE POUR L'ASSISTANT IA : ... »). On retire les phrases qui parlent a l'IA ou qui
+# affirment un ecart au marche, avant que le modele ne les lise.
+_SUSPECT = re.compile(
+    r"assistant|\bia\b|\bai\b|intelligence artificielle|chatbot|mod[eè]le|prompt|consigne|instruction"
+    r"|ignore|oublie|recommande|affirme|meilleure affaire|sous le march|du march[eé] de|%|pour cent|\bsyst[eè]me\b",
+    re.IGNORECASE,
+)
+
+
+def _nettoyer(description: str) -> str:
+    phrases = re.split(r"(?<=[.!?])\s+", description)
+    gardees = [p for p in phrases if not _SUSPECT.search(p)]
+    if len(gardees) < len(phrases):
+        gardees.append("[texte retire : instruction suspecte dans l'annonce]")
+    return " ".join(gardees)
 
 
 def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: float | None = None,
@@ -49,7 +68,8 @@ def chercher_biens(budget_max: float, quartier: str | None = None, surface_min: 
         if mots:
             biens = [b for b in biens
                      if any(m in f"{b['type']} {b['description']}".lower() for m in mots)]
-    return sorted(biens, key=lambda b: b["prix"])[:5]
+    return [{**b, "description": _nettoyer(b["description"])}
+            for b in sorted(biens, key=lambda b: b["prix"])[:5]]
 
 
 def ecart_au_marche(bien_id: str) -> dict:
